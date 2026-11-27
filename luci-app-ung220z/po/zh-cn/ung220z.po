@@ -1,0 +1,132 @@
+# Translation of luci-app-ung220z to Chinese (Simplified)
+# Copyright (C) 2026 kenzok8
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-ung220z\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "UNG220Z"
+msgstr "UNG220Z"
+
+msgid "Extract credentials from your own ONT (UNG220Z and other .gch devices): Web admin, Telnet, PPPoE and WiFi passwords. The router must be able to reach the ONT address (usually 192.168.1.1 on the WAN side). Results are shown here only and are not stored on the router."
+msgstr "提取你自己光猫（UNG220Z 及其他 .gch 设备）的凭据：Web 超管、Telnet、PPPoE 宽带和 WiFi 密码。路由器必须能连上光猫地址（通常是 WAN 侧的 192.168.1.1）。结果只显示在这里，不保存在路由器上。"
+
+msgid "ONT address"
+msgstr "光猫地址"
+
+msgid "Usually 192.168.1.1. The ONT sits on the WAN side; the router needs a route to it."
+msgstr "通常是 192.168.1.1。光猫在 WAN 侧，路由器需要有到它的路由。"
+
+msgid "Username"
+msgstr "用户名"
+
+msgid "Printed on the sticker on the ONT, usually \"user\"."
+msgstr "印在光猫背面贴纸上，通常是 user。"
+
+msgid "Password"
+msgstr "密码"
+
+msgid "Printed on the sticker on the ONT."
+msgstr "印在光猫背面贴纸上。"
+
+msgid "Probe"
+msgstr "探测"
+
+msgid "Extract credentials"
+msgstr "提取凭据"
+
+msgid "Probing…"
+msgstr "探测中……"
+
+msgid "Extracting credentials, this may take up to a minute…"
+msgstr "正在提取凭据，最多约一分钟……"
+
+msgid "Please enter the ONT address"
+msgstr "请填写光猫地址"
+
+msgid "Please fill in the ONT address, username and password"
+msgstr "请填写光猫地址、用户名和密码"
+
+msgid "Probe failed"
+msgstr "探测失败"
+
+msgid "Probe failed: %s"
+msgstr "探测失败：%s"
+
+msgid "Failed to start extraction"
+msgstr "无法开始提取"
+
+msgid "Failed to start extraction: %s"
+msgstr "无法开始提取：%s"
+
+msgid "Job check failed: %s"
+msgstr "查询任务失败：%s"
+
+msgid "Timed out waiting for the extraction job"
+msgstr "等待提取任务超时"
+
+msgid "Extraction failed"
+msgstr "提取失败"
+
+msgid "Fingerprint"
+msgstr "指纹"
+
+msgid "Server: %s, Title: %s, Family: %s"
+msgstr "Server：%s，标题：%s，家族：%s"
+
+msgid "Unrecognized"
+msgstr "未识别"
+
+msgid "Looks like a .gch device; UNG220Z extraction may work."
+msgstr "像是 .gch 设备，UNG220Z 提取可能适用。"
+
+msgid "Not a .gch device; UNG220Z extraction does not apply. Try ontkit (ZTE/Huawei/FiberHome) instead."
+msgstr "不是 .gch 设备，UNG220Z 提取不适用，改试 ontkit（中兴/华为/烽火）。"
+
+msgid "Credentials for %s"
+msgstr "%s 的凭据"
+
+msgid "Passwords rotate about every 15 minutes (TR-069); re-run to fetch fresh ones."
+msgstr "口令约每 15 分钟轮换一次（TR-069），重跑可取新值。"
+
+msgid "Hide passwords"
+msgstr "隐藏密码"
+
+msgid "Show passwords"
+msgstr "显示密码"
+
+msgid "Copy"
+msgstr "复制"
+
+msgid "Copied to clipboard"
+msgstr "已复制到剪贴板"
+
+msgid "Item"
+msgstr "项目"
+
+msgid "Telnet / root shell"
+msgstr "Telnet / root shell"
+
+msgid "Web admin"
+msgstr "Web 超管"
+
+msgid "Web user"
+msgstr "Web 普通用户"
+
+msgid "PPPoE broadband"
+msgstr "PPPoE 宽带"
+
+msgid "Linux root"
+msgstr "Linux root"
+
+msgid "WiFi %s"
+msgstr "WiFi %s"
+
+msgid "Telnet user %s"
+msgstr "Telnet 用户 %s"
+
+msgid "Factory placeholder"
+msgstr "出厂占位"
+
+msgid "Not cracked (common passwords did not match)"
+msgstr "未破解（常见口令未命中）"

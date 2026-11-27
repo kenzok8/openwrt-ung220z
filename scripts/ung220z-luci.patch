@@ -1,0 +1,383 @@
+--- a/ung220z.py
++++ b/ung220z.py
+@@ -3,6 +3,15 @@
+ """
+ ung220z.py —— UNG220Z / Unionman 中国移动网关 凭据提取工具
+ 
++[luci-patch] 本文件为上游 Hut-hzf/ung220z-tool@4eb1b1f7 的 vendored 副本，
++仅为 OpenWrt/LuCI 做了以下改动（均以 [luci-patch] 标注）：
++  - webbrowser/unicodedata/getpass 改为可选导入（python3-light 不含 webbrowser）
++  - 新增 --json：只打印一个 JSON 对象到 stdout，日志走 stderr，不落盘日志
++  - 新增 --probe：只做指纹探测；新增 --password-file：密码从 0600 文件读
++  - 失败出口统一走 _fail()，保留原退出码语义（0/1/2/3/4/5/130）
++  - 汇总时额外收集 telnet_users、root 哈希/是否破解成功，供 JSON 输出
++上游更新后，用 scripts/sync-upstream.sh（见仓库 README）重新打补丁。
++
+ 流程
+   1. 询问网关地址、普通账户、密码
+   2. 补全 http://<ip>/usr=<user>&psw=<pass>&cmd=1&telnet.gch 并发送给浏览器，开启 Telnet
+@@ -15,9 +24,9 @@
+   python3 ung220z.py -i 192.168.1.1 -u user -p 'xxxx' --no-browser
+ """
+ import argparse
+-import getpass
+ import html as html_mod
+ import http.cookiejar
++import json
+ import os
+ import random
+ import re
+@@ -26,11 +35,24 @@
+ import subprocess
+ import sys
+ import time
+-import unicodedata
+ import urllib.error
+ import urllib.parse
+ import urllib.request
+-import webbrowser
++
++# [luci-patch] OpenWrt python3-light does not ship webbrowser; guard the
++# optional imports so a missing module only costs the desktop niceties.
++try:
++    import getpass
++except ImportError:
++    getpass = None
++try:
++    import unicodedata
++except ImportError:
++    unicodedata = None
++try:
++    import webbrowser
++except ImportError:
++    webbrowser = None
+ 
+ IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
+ TELNET_USER = "CMCCAdmin"
+@@ -40,17 +62,21 @@
+ PLACEHOLDER_PSK = "!@#$%12345"
+ 
+ _logfh = None
++_json_mode = False  # [luci-patch] --json: logs go to stderr, stdout holds one JSON object
+ 
+ 
+ def log(tag, msg):
+     line = "[%s] %-6s %s" % (time.strftime("%H:%M:%S"), tag, msg)
+-    print(line, flush=True)
++    # [luci-patch] JSON mode: log to stderr so stdout stays parseable JSON.
++    print(line, file=sys.stderr if _json_mode else sys.stdout, flush=True)
+     if _logfh:
+         _logfh.write(line + "\n")
+         _logfh.flush()
+ 
+ 
+ def dwidth(s):
++    if unicodedata is None:
++        return len(s)
+     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+ 
+ 
+@@ -151,7 +177,10 @@
+     return False
+ 
+ 
+-def enable_telnet(ip, user, pw, open_browser=True):
++def enable_telnet(ip, user, pw, open_browser=True, timeout=8):
++    # [luci-patch] 上游 bug 修复：main() 调用时传了 timeout=a.timeout，但原
++    # 签名没有 timeout 参数，每次提取都在这里 TypeError 崩溃（exit 1）。
++    # 见 https://github.com/Hut-hzf/ung220z-tool 上游 @4eb1b1f7。
+     base = "http://%s/" % ip
+     # 口令里的 % & # ? + 空格 必须先百分号编码，否则服务器会返回 400 Bad Request
+     # （社区实测：aDm8H%MdA 必须写成 aDm8H%25MdA）
+@@ -162,7 +191,7 @@
+     variants = [quoted, raw] if risky else [raw, quoted]
+     variants.append("%s?usr=%s&psw=%s&cmd=1&telnet.gch" % (
+         base, urllib.parse.quote(user, safe=""), urllib.parse.quote(pw, safe="")))
+-    if open_browser:
++    if open_browser and webbrowser is not None:
+         try:
+             opened = webbrowser.open(variants[0])
+             log("HTTP", "已发送给浏览器%s: http://%s/usr=%s&psw=***&cmd=1&telnet.gch"
+@@ -172,7 +201,7 @@
+     missing = False
+     for url in variants:
+         try:
+-            body = http_get(url)
++            body = http_get(url, timeout=timeout)
+         except urllib.error.HTTPError as e:
+             if e.code == 404:
+                 missing = True
+@@ -227,6 +256,26 @@
+         return []
+ 
+ 
++def probe_info(ip):
++    """[luci-patch] Probe the fingerprint, return structured info (for --probe / LuCI)."""
++    info = {"ip": ip, "reachable": False, "server": "-", "title": "-", "hits": []}
++    try:
++        req = urllib.request.Request("http://%s/" % ip,
++                                     headers={"User-Agent": "Mozilla/5.0 Chrome/120"})
++        with urllib.request.urlopen(req, timeout=6) as r:
++            info["reachable"] = True
++            info["server"] = r.headers.get("Server", "-")
++            body = _decode(r.read(), r.headers.get("Content-Type", ""))
++        m = re.search(r"<title>([^<]*)</title>", body, re.I)
++        if m:
++            info["title"] = m.group(1).strip()
++        low = body.lower()
++        info["hits"] = [name for key, name in MARKERS if key in low]
++    except Exception as e:
++        info["error"] = "%s: %s" % (e.__class__.__name__, e)
++    return info
++
++
+ def suggest_from_fingerprint(hits, ip):
+     """根据指纹给出下一步建议。"""
+     text = " ".join(hits)
+@@ -547,8 +596,65 @@
+ # ─────────────────────────────── 主流程 ───────────────────────────────
+ 
+ 
++def _fail(code, error):
++    """[luci-patch] Failure exit: print a JSON error object on stdout in JSON
++    mode, stay silent otherwise. Returns the exit code."""
++    if _json_mode:
++        print(json.dumps({"ok": False, "code": code, "error": error},
++                         ensure_ascii=False), flush=True)
++    return code
++
++
++def _json_ok(payload):
++    """[luci-patch] Success exit: print exactly one JSON object on stdout."""
++    payload["ok"] = True
++    print(json.dumps(payload, ensure_ascii=False), flush=True)
++
++
++def _obtain_credentials(a):
++    """[luci-patch] Gather (ip, user, password).
++
++    Interactive mode prompts exactly as upstream does. In --json mode it
++    never prompts: the password comes from --password-file (preferred; the
++    file is removed after being read) or -p. Returns (ip, user, pw); pw
++    is None when no password could be obtained.
++    """
++    if _json_mode:
++        ip = (a.ip or "").strip() or "192.168.1.1"
++        user = (a.user or "").strip() or "user"
++        pw = None
++        if a.password_file:
++            try:
++                with open(a.password_file, "r", encoding="utf-8") as f:
++                    pw = f.read().rstrip("\r\n")
++                try:
++                    os.unlink(a.password_file)
++                except OSError:
++                    pass
++            except OSError as e:
++                log("WARN", "读密码文件失败：%s" % e)
++        elif a.password:
++            pw = a.password.rstrip("\r\n")
++        return (ip, user, pw)
++    print()
++    print("  ※ 用户名和密码通常印在光猫【背面贴纸】上（S/N 标签）")
++    print("    形如「用户名：user   密码：xxxxxxxx」，把光猫翻过来就能看到")
++    print(flush=True)
++    ip = (a.ip or "").strip() or input("① 光猫地址 [192.168.1.1]: ").strip() or "192.168.1.1"
++    user = (a.user or "").strip() or input("② 用户名 [user]: ").strip() or "user"
++    if a.password:
++        pw = a.password.rstrip("\r\n")          # 首尾空格可能是口令的一部分
++    else:
++        print("③ 密码（输入时不显示）", flush=True)
++        if sys.stdin.isatty() and getpass is not None:
++            pw = getpass.getpass("   密码: ").rstrip("\r\n")
++        else:
++            pw = input("   密码: ").rstrip("\r\n")
++    return (ip, user, pw)
++
++
+ def main():
+-    global _logfh
++    global _logfh, _json_mode
+     ap = argparse.ArgumentParser(description="UNG220Z 凭据提取")
+     ap.add_argument("-i", "--ip", default=None, help="光猫地址，默认 192.168.1.1")
+     ap.add_argument("-u", "--user", default=None, help="登录用户名，默认 user")
+@@ -560,51 +666,61 @@
+     ap.add_argument("--telnet-port", type=int, default=23, help="Telnet 端口，默认 23")
+     ap.add_argument("--timeout", type=float, default=8.0, help="网络超时秒数，默认 8")
+     ap.add_argument("--unlock", action="store_true", help="Web 被会话锁占住时，重启 httpd 解锁")
++    ap.add_argument("--json", action="store_true", help="机器可读输出：只打印一个 JSON 对象到 stdout，日志走 stderr（供 LuCI 调用）")
++    ap.add_argument("--probe", action="store_true", help="只做指纹探测，不提取凭据（可与 --json 联用）")
++    ap.add_argument("--password-file", default=None, help="从文件读密码（避免密码出现在进程列表里），文件应为 0600")
+     a = ap.parse_args()
++    _json_mode = bool(a.json)
+ 
+     logfile = "ung220z_%s.log" % time.strftime("%Y%m%d_%H%M%S")
+-    try:
+-        _logfh = open(logfile, "w", encoding="utf-8")
++    if _json_mode:
++        # [luci-patch] JSON mode writes no log file (it holds cleartext
++        # credentials); the result goes to stdout only.
++        _logfh = None
++    else:
+         try:
+-            os.chmod(logfile, 0o600)
++            _logfh = open(logfile, "w", encoding="utf-8")
++            try:
++                os.chmod(logfile, 0o600)
++            except OSError:
++                pass
+         except OSError:
+-            pass
+-    except OSError:
+-        _logfh = None
+-        print("提示：当前目录不可写，日志只输出到屏幕")
++            _logfh = None
++            print("提示：当前目录不可写，日志只输出到屏幕")
+ 
+     tn = None
+     try:
+-        # ── 交互提示：先说用户名，再说密码 ──
+-        print()
+-        print("  ※ 用户名和密码通常印在光猫【背面贴纸】上（S/N 标签）")
+-        print("    形如「用户名：user   密码：xxxxxxxx」，把光猫翻过来就能看到")
+-        print(flush=True)
+-
+-        ip = (a.ip or "").strip() or input("① 光猫地址 [192.168.1.1]: ").strip() or "192.168.1.1"
+-        user = (a.user or "").strip() or input("② 用户名 [user]: ").strip() or "user"
+-
+-        if a.password:
+-            pw = a.password.rstrip("\r\n")          # 首尾空格可能是口令的一部分
+-        else:
+-            print("③ 密码（输入时不显示）", flush=True)
+-            if sys.stdin.isatty():
+-                pw = getpass.getpass("   密码: ").rstrip("\r\n")
+-            else:
+-                pw = input("   密码: ").rstrip("\r\n")
++        # [luci-patch] --probe: fingerprint only, no account or password needed.
++        if a.probe:
++            ip = (a.ip or "").strip() or "192.168.1.1"
++            info = probe_info(ip)
++            if not info["reachable"]:
++                log("WARN", "网关不可达：%s" % info.get("error", ""))
++                return _fail(2, "网关不可达")
++            if _json_mode:
++                _json_ok(info)
++                return 0
++            log("DATA", "指纹 Server=%s  title=%s  特征=%s"
++                % (info["server"], info["title"], " / ".join(info["hits"]) or "未识别"))
++            suggest_from_fingerprint(info["hits"], ip)
++            return 0
+ 
++        ip, user, pw = _obtain_credentials(a)
+         if not pw:
++            if _json_mode:
++                return _fail(1, "未提供密码（JSON 模式需要 -p 或 --password-file）")
+             log("WARN", "密码为空，退出")
+             print("\n没有输入密码，已退出。密码印在光猫背面的贴纸上。")
+             return 1
+ 
+         log("INFO", "会话开始  目标=%s  账户=%s" % (ip, user))
+-        log("INFO", "日志文件 %s" % os.path.abspath(logfile))
++        if not _json_mode:
++            log("INFO", "日志文件 %s" % os.path.abspath(logfile))
+ 
+         if not probe_port(ip, 80, a.timeout):
+             log("PROBE", "TCP 80/%s → closed" % ip)
+             log("WARN", "网关不可达，检查地址与网络")
+-            return 2
++            return _fail(2, "网关不可达")
+         log("PROBE", "TCP 80/%s → open" % ip)
+ 
+         if not a.no_release:
+@@ -622,7 +738,7 @@
+                 log("HINT", "该固件的 telnet 开启方式可能与本脚本不同")
+             else:
+                 log("HINT", "telnet.gch 已返回 Success 但端口未监听：确认设备没禁用 Telnet 服务")
+-            return 3
++            return _fail(3, "Telnet 端口未开放")
+         log("PROBE", "TCP %d/%s → open" % (a.telnet_port, ip))
+ 
+         # ── Telnet 登录：多账号多口令，逐级升级 ──
+@@ -639,7 +755,7 @@
+             log("WARN", "Telnet 登录失败：所有候选账号/口令均被拒绝")
+             log("HINT", "浏览器用超管登录后打开下面这个地址可看到 Telnet 口令：")
+             log("HINT", "  http://%s/getpage.gch?pid=1002&nextpage=tele_sec_tserver_t.gch" % ip)
+-            return 4
++            return _fail(4, "Telnet 登录失败")
+ 
+         st = web_state(ip)
+         log("PROBE", "Web 状态 → %s" % st)
+@@ -657,11 +773,11 @@
+             log("WARN", "配置解密失败（sidbg 返回: %s）" % (dec[:80] or "空"))
+             log("HINT", "九联/中兴方案的配置也可能在 /config/work/lastgood.xml（加密）")
+             log("HINT", "解密工具：https://github.com/joestar817/decrypt-lastgood")
+-            return 5
++            return _fail(5, "配置解密失败")
+         log("SHELL", "sidbg 1 DB decry %s → %s" % (CFG_ENC, CFG_DEC))
+ 
+         cfg = Cfg(tn, timeout=max(90.0, a.timeout * 6))
+-        creds, wifi = {}, []
++        creds, wifi, telnet_users = {}, [], []
+ 
+         for r in cfg.rows("DevAuthInfo"):
+             lvl = r.get("Level")
+@@ -671,6 +787,9 @@
+         for r in cfg.rows("TelnetUser"):
+             log("DATA", "TelnetUser   %-10s / %-18s  Type=%s"
+                 % (r.get("Username"), r.get("Password"), r.get("Type")))
++            telnet_users.append({"user": r.get("Username"),
++                                 "password": r.get("Password"),
++                                 "type": r.get("Type")})
+ 
+         ts_pw = cfg.scalar("TS_UPwd")
+         if ts_pw:
+@@ -697,16 +816,33 @@
+ 
+         shadow = tn.run("grep root /etc/shadow | head -1", timeout=a.timeout)
+         m = re.search(r"root:(\$[0-9]\$[^:]+):", shadow)
++        root_hash = root_cracked = None
+         if m:
+-            root_pw = crack_root(m.group(1), ["aDm8H%MdA", "admin", "root", "123456", "CMCCAdmin"])
++            root_hash = m.group(1)
++            root_pw = crack_root(root_hash, ["aDm8H%MdA", "admin", "root", "123456", "CMCCAdmin"])
+             if root_pw:
+                 log("CRACK", "MATCH: %s  (/etc/shadow)" % root_pw)
+                 creds["root"] = ("root", root_pw)
++                root_cracked = root_pw
+             else:
+-                log("DATA", "root 哈希 %s…（常见口令未命中）" % m.group(1)[:32])
+-                creds["root"] = ("root", m.group(1))
++                log("DATA", "root 哈希 %s…（常见口令未命中）" % root_hash[:32])
++                creds["root"] = ("root", root_hash)
+ 
+         # ── 汇总 ──
++        if _json_mode:
++            out = {"ip": ip, "credentials": {}, "wifi": [], "telnet_users": telnet_users}
++            for key in ("telnet", "web_admin", "web_user", "pppoe"):
++                if key in creds:
++                    u, p = creds[key]
++                    out["credentials"][key] = {"user": u, "password": p}
++            if root_hash is not None:
++                out["credentials"]["root"] = {"user": "root", "password": root_cracked,
++                                              "hash": root_hash, "cracked": root_cracked is not None}
++            for ssid, psk in wifi:
++                out["wifi"].append({"ssid": ssid, "psk": psk,
++                                    "factory_placeholder": psk == PLACEHOLDER_PSK})
++            _json_ok(out)
++            return 0
+         print("\n" + "═" * 66)
+         print(" 凭据汇总    %s" % ip)
+         print("═" * 66)
+@@ -725,10 +861,10 @@
+ 
+     except KeyboardInterrupt:
+         log("WARN", "用户中断")
+-        return 130
++        return _fail(130, "用户中断")
+     except Exception as e:
+         log("WARN", "%s: %s" % (e.__class__.__name__, e))
+-        return 1
++        return _fail(1, "%s: %s" % (e.__class__.__name__, e))
+     finally:
+         if tn is not None:
+             try:

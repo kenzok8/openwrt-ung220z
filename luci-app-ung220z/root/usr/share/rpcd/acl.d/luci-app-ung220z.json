@@ -1,0 +1,1 @@
+{"luci-app-ung220z":{"description":"Grant access to UNG220Z controls","read":{"ubus":{"ung220z":["probe","job_status"]}},"write":{"ubus":{"ung220z":["extract"]}}}}

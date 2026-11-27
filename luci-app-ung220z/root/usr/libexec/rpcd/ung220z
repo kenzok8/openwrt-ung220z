@@ -1,0 +1,150 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# rpcd service for luci-app-ung220z: probe an ONT and extract its
+# credentials via /usr/bin/ung220z (JSON mode). The password is never
+# placed on a command line: it travels in a 0600 file that the backend
+# removes after reading. Results live in 0700 job dirs under /tmp and
+# are deleted once collected.
+
+. /usr/share/libubox/jshn.sh
+
+UNG220Z=/usr/bin/ung220z
+JOBS=/tmp/ung220z-jobs
+JOB_TIMEOUT=150
+
+emit_result() {
+	ok=$1
+	message=$2
+	[ "$ok" = true ] && ok=1 || ok=0
+	json_init
+	json_add_boolean ok "$ok"
+	json_add_string message "$message"
+	json_dump
+}
+
+valid_host() {
+	[ -n "$1" ] || return 1
+	[ "$(printf '%s' "$1" | wc -c)" -le 253 ] || return 1
+	case "$1" in *[!A-Za-z0-9.:-]*) return 1 ;; esac
+	return 0
+}
+
+valid_user() {
+	[ -n "$1" ] || return 1
+	[ "$(printf '%s' "$1" | wc -c)" -le 64 ] || return 1
+	case "$1" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+	return 0
+}
+
+valid_job_id() {
+	case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+	return 0
+}
+
+probe() {
+	request=$(cat)
+	json_load "$request" 2>/dev/null || { emit_result false invalid_request; return 1; }
+	json_get_var ip ip
+	valid_host "$ip" || { emit_result false invalid_ip; return 1; }
+
+	out=$(mktemp /tmp/ung220z-probe.XXXXXX) || { emit_result false probe_failed; return 1; }
+	chmod 0600 "$out"
+	"$UNG220Z" --json --probe -i "$ip" > "$out" 2>/dev/null
+	if [ -s "$out" ] && json_load "$(cat "$out")" 2>/dev/null; then
+		cat "$out"
+	else
+		emit_result false probe_failed
+	fi
+	rm -f "$out"
+}
+
+extract() {
+	request=$(cat)
+	json_load "$request" 2>/dev/null || { emit_result false invalid_request; return 1; }
+	json_get_var ip ip
+	json_get_var user user
+	json_get_var password password
+	valid_host "$ip" || { emit_result false invalid_ip; return 1; }
+	valid_user "$user" || { emit_result false invalid_user; return 1; }
+	[ -n "$password" ] || { emit_result false missing_password; return 1; }
+	[ "$(printf '%s' "$password" | wc -c)" -le 256 ] || { emit_result false password_too_long; return 1; }
+
+	# Prune stale jobs (older than 1h) so /tmp does not fill up.
+	find "$JOBS" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} + 2>/dev/null
+	mkdir -p "$JOBS" || { emit_result false job_failed; return 1; }
+	job_id="$(date +%s)-$$-$RANDOM"
+	job="$JOBS/$job_id"
+	mkdir -p "$job" || { emit_result false job_failed; return 1; }
+	chmod 0700 "$job"
+	pwfile="$job/password"
+	printf '%s' "$password" > "$pwfile" || { rm -rf "$job"; emit_result false job_failed; return 1; }
+	chmod 0600 "$pwfile"
+	( umask 077
+	  "$UNG220Z" --json --no-browser -i "$ip" -u "$user" --password-file "$pwfile" --timeout 8 > "$job/out.json" 2> "$job/err.log"
+	  echo $? > "$job/code"
+	) >/dev/null 2>&1 &
+	json_init
+	json_add_boolean ok 1
+	json_add_string job_id "$job_id"
+	json_dump
+}
+
+job_status() {
+	request=$(cat)
+	json_load "$request" 2>/dev/null || { emit_result false invalid_request; return 1; }
+	json_get_var job_id job_id
+	valid_job_id "$job_id" || { emit_result false invalid_job; return 1; }
+	job="$JOBS/$job_id"
+	[ -d "$job" ] || { emit_result false unknown_job; return 1; }
+	if [ -f "$job/code" ]; then
+		if [ -s "$job/out.json" ] && json_load "$(cat "$job/out.json")" 2>/dev/null; then
+			cat "$job/out.json"
+		else
+			emit_result false extract_failed
+		fi
+		rm -rf "$job"
+	else
+		case "$job_id" in
+		*-*) start=${job_id%%-*} ;;
+		*) start=$(date +%s) ;;
+		esac
+		case "$start" in *[!0-9]*) start=$(date +%s) ;; esac
+		age=$(( $(date +%s) - start ))
+		if [ "$age" -gt "$JOB_TIMEOUT" ]; then
+			rm -rf "$job"
+			emit_result false job_timeout
+		else
+			json_init
+			json_add_boolean ok 1
+			json_add_boolean running 1
+			json_dump
+		fi
+	fi
+}
+
+case "$1" in
+list)
+	echo '{"probe":{"ip":"String"},"extract":{"ip":"String","user":"String","password":"String"},"job_status":{"job_id":"String"}}'
+	;;
+call)
+	case "$2" in
+	probe)
+		probe
+		;;
+	extract)
+		extract
+		;;
+	job_status)
+		job_status
+		;;
+	*)
+		emit_result false unknown_method
+		exit 1
+		;;
+	esac
+	;;
+*)
+	exit 2
+	;;
+esac
